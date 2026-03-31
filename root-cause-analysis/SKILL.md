@@ -68,6 +68,8 @@ Run all steps against `ARCHIVE`:
 - **Step 3**: assess whether triage is sufficient
 - **Step 4**: deep analysis if needed (`extract-logs.py --summary`, then `--last-boot --errors-only`)
 
+**Tool discipline**: use `Read` and `Grep` for all file reads — not `cat`/`tail`/`grep` via Bash. Reserve Bash for commands that genuinely need a shell (tar extraction, python3 for SMART JSON, extract-logs.py). Combining many reads into one large Bash script causes the tool to run in the background, losing output and forcing retries.
+
 As you go, actively cross-reference log findings against what the ticket says:
 - Does the error message in the logs match what the reporter pasted?
 - Does the UUID in the logs match the app/device in the ticket?
