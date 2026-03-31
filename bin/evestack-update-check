@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# evestack-update-check
+# Runs as a Claude Code UserPromptSubmit hook.
+# Checks once per session (and fetches at most once per day) whether evestack
+# has upstream updates. If behind, informs Claude via additionalContext so it
+# can suggest running /autoupdate.
+#
+# Failures are always silent (exit 0) — this is a passive background check.
+
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EVESTACK_DIR="$(dirname "$BIN_DIR")"
+TIMESTAMP_FILE="$EVESTACK_DIR/.last_update_check"
+CHECK_INTERVAL_MINUTES=$((24 * 60))
+
+# --- Per-session deduplication ---
+# Read hook input from stdin to get session_id
+INPUT="$(cat)"
+SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)"
+
+if [[ -n "$SESSION_ID" ]]; then
+  MARKER="/tmp/evestack-check-${SESSION_ID}"
+  if [[ -f "$MARKER" ]]; then
+    exit 0  # Already ran this session
+  fi
+  touch "$MARKER"
+fi
+
+# --- Pre-flight: must be a git repo ---
+if ! git -C "$EVESTACK_DIR" rev-parse --git-dir > /dev/null 2>&1; then
+  exit 0
+fi
+
+# --- Network fetch: throttled to once per day ---
+NEEDS_FETCH=true
+if [[ -f "$TIMESTAMP_FILE" ]]; then
+  if find "$TIMESTAMP_FILE" -mmin "-${CHECK_INTERVAL_MINUTES}" 2>/dev/null | grep -q .; then
+    NEEDS_FETCH=false
+  fi
+fi
+
+if [[ "$NEEDS_FETCH" == true ]]; then
+  git -C "$EVESTACK_DIR" fetch origin --quiet 2>/dev/null || exit 0
+  date > "$TIMESTAMP_FILE"
+fi
+
+# --- Compare refs ---
+LOCAL="$(git -C "$EVESTACK_DIR" rev-parse HEAD 2>/dev/null)" || exit 0
+REMOTE="$(git -C "$EVESTACK_DIR" rev-parse @{u} 2>/dev/null)" || exit 0
+
+[[ "$LOCAL" == "$REMOTE" ]] && exit 0  # Up to date
+
+BEHIND="$(git -C "$EVESTACK_DIR" rev-list HEAD..@{u} --count 2>/dev/null)" || exit 0
+
+# --- Notify Claude via additionalContext ---
+jq -n --arg msg "evestack has ${BEHIND} new commit(s) available. Let the user know and suggest they run /autoupdate to update their EVE development skills." '{
+  hookSpecificOutput: {
+    hookEventName: "UserPromptSubmit",
+    additionalContext: $msg
+  }
+}'
+
+exit 0

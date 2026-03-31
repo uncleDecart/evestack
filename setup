@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# evestack setup script
+# Installs evestack skills for Claude Code (and other AI agents)
+
+VERSION="0.1.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILLS_DIR="$SCRIPT_DIR"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# Defaults
+HOST="claude"
+LOCAL_INSTALL=false
+USE_PREFIX=  # unset; set by --prefix/--no-prefix flags or interactive prompt
+
+print_banner() {
+  echo ""
+  echo -e "${BOLD}  evestack ${VERSION}${NC}"
+  echo -e "  Skills for EVE development"
+  echo ""
+}
+
+usage() {
+  echo "Usage: ./setup [OPTIONS]"
+  echo ""
+  echo "Options:"
+  echo "  --host <agent>  Target agent: claude (default), codex"
+  echo "  --local         Install into the current project (.claude/skills/) instead of globally"
+  echo "  --prefix        Use prefixed skill names (/evestack-<skill>)"
+  echo "  --no-prefix     Use short skill names (/<skill>) — skips interactive prompt"
+  echo "  --help          Show this help message"
+  echo ""
+}
+
+log_info() {
+  echo -e "${BLUE}[info]${NC} $1"
+}
+
+log_success() {
+  echo -e "${GREEN}[ok]${NC} $1"
+}
+
+log_warn() {
+  echo -e "${YELLOW}[warn]${NC} $1"
+}
+
+log_error() {
+  echo -e "${RED}[error]${NC} $1"
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host)
+      HOST="$2"
+      shift 2
+      ;;
+    --local)
+      LOCAL_INSTALL=true
+      shift
+      ;;
+    --prefix)
+      USE_PREFIX=true
+      shift
+      ;;
+    --no-prefix)
+      USE_PREFIX=false
+      shift
+      ;;
+    --help)
+      usage
+      exit 0
+      ;;
+    *)
+      log_error "Unknown option: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+# Determine skill target directory
+if [[ "$HOST" == "claude" ]]; then
+  if [[ "$LOCAL_INSTALL" == true ]]; then
+    TARGET_DIR="$(pwd)/.claude/skills/evestack"
+  else
+    TARGET_DIR="$HOME/.claude/skills/evestack"
+  fi
+elif [[ "$HOST" == "codex" ]]; then
+  if [[ "$LOCAL_INSTALL" == true ]]; then
+    TARGET_DIR="$(pwd)/.agents/skills/evestack"
+  else
+    TARGET_DIR="$HOME/.agents/skills/evestack"
+  fi
+else
+  log_error "Unsupported host: $HOST (supported: claude, codex)"
+  exit 1
+fi
+
+print_banner
+
+# Prompt for prefix preference if not set by flag
+if [[ -z "$USE_PREFIX" ]]; then
+  echo -e "  How would you like skills to be named?"
+  echo -e "    [1] /hello          (recommended — shorter and faster to type)"
+  echo -e "    [2] /evestack-hello (use if you have multiple skill packs and want to avoid name collisions)"
+  echo ""
+  read -rp "  Choose [1/2, default: 1]: " prefix_choice
+  case "$prefix_choice" in
+    2) USE_PREFIX=true ;;
+    *) USE_PREFIX=false ;;
+  esac
+  echo ""
+fi
+
+# Discover skill directories (each directory with a SKILL.md is a skill)
+discover_skills() {
+  local skills=()
+  for dir in "$SKILLS_DIR"/*/; do
+    if [[ -f "$dir/SKILL.md" ]]; then
+      skills+=("$(basename "$dir")")
+    fi
+  done
+  echo "${skills[@]}"
+}
+
+
+# Remove dangling symlinks in parent_dir that point into skills_source (evestack dir)
+prune_dangling_symlinks() {
+  local parent_dir="$1"
+  local skills_source="$2"
+  local pruned=0
+
+  for link in "$parent_dir"/*/; do
+    link="${link%/}"
+    if [[ -L "$link" ]]; then
+      local target
+      target="$(readlink "$link")"
+      if [[ "$target" == "$skills_source/"* ]] && [[ ! -e "$target" ]]; then
+        log_info "Pruning stale symlink: $(basename "$link")"
+        rm -f "$link"
+        ((pruned++)) || true
+      fi
+    fi
+  done
+
+  [[ $pruned -gt 0 ]] && log_success "Removed $pruned stale symlink(s)"
+  return 0
+}
+
+# Install skills via symlinks
+install_skills() {
+  local skills
+  read -ra skills <<< "$(discover_skills)"
+
+  if [[ ${#skills[@]} -eq 0 ]]; then
+    log_warn "No skills found. Create a directory with a SKILL.md file to add skills."
+    return
+  fi
+
+  log_info "Installing ${#skills[@]} skill(s) to $TARGET_DIR ..."
+
+  # Ensure parent directory exists
+  local parent_dir
+  parent_dir="$(dirname "$TARGET_DIR")"
+  mkdir -p "$parent_dir"
+
+  # Clean up symlinks for skills that have been removed from evestack
+  prune_dangling_symlinks "$parent_dir" "$SKILLS_DIR"
+
+
+  for skill in "${skills[@]}"; do
+    local skill_source="$SKILLS_DIR/$skill"
+    local skill_name="$skill"
+
+    if [[ "$USE_PREFIX" == true ]]; then
+      skill_name="evestack-$skill"
+    fi
+
+    local link_path="$parent_dir/$skill_name"
+
+    # Remove existing link if it points somewhere else
+    if [[ -L "$link_path" ]]; then
+      local existing_target
+      existing_target="$(readlink "$link_path")"
+      if [[ "$existing_target" != "$skill_source" ]]; then
+        rm -f "$link_path"
+      else
+        log_success "$skill_name (already linked)"
+        continue
+      fi
+    elif [[ -d "$link_path" ]]; then
+      log_warn "$link_path exists as a directory, skipping"
+      continue
+    fi
+
+    ln -s "$skill_source" "$link_path"
+    log_success "$skill_name"
+  done
+}
+
+# Register the auto-update check hook in settings.json
+register_hook() {
+  local settings_file
+  if [[ "$LOCAL_INSTALL" == true ]]; then
+    settings_file="$(pwd)/.claude/settings.json"
+  else
+    settings_file="$HOME/.claude/settings.json"
+  fi
+
+  local hook_cmd="$SKILLS_DIR/bin/evestack-update-check"
+
+  if ! command -v jq &>/dev/null; then
+    log_warn "jq not found — skipping auto-update hook. Install jq and re-run setup to enable it."
+    return
+  fi
+
+  # Create settings file if it doesn't exist
+  if [[ ! -f "$settings_file" ]]; then
+    mkdir -p "$(dirname "$settings_file")"
+    echo '{}' > "$settings_file"
+  fi
+
+  # Idempotent: skip if hook command is already registered
+  if jq -e --arg cmd "$hook_cmd" \
+      '[.hooks.UserPromptSubmit[]?.hooks[]?] | any(.command == $cmd)' \
+      "$settings_file" 2>/dev/null | grep -q true; then
+    log_success "auto-update hook (already registered)"
+    return
+  fi
+
+  local new_entry
+  new_entry="$(jq -n --arg cmd "$hook_cmd" '{
+    matcher: "",
+    hooks: [{type: "command", command: $cmd, timeout: 30}]
+  }')"
+
+  jq --argjson entry "$new_entry" '
+    .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [$entry])
+  ' "$settings_file" > "$settings_file.tmp" && mv "$settings_file.tmp" "$settings_file"
+
+  log_success "auto-update hook → $settings_file"
+}
+
+# Register MCP servers required by evestack skills
+register_mcp_servers() {
+  local settings_file
+  if [[ "$LOCAL_INSTALL" == true ]]; then
+    settings_file="$(pwd)/.claude/settings.json"
+  else
+    settings_file="$HOME/.claude/settings.json"
+  fi
+
+  if ! command -v jq &>/dev/null; then
+    log_warn "jq not found — skipping MCP server registration. Install jq and re-run setup."
+    return
+  fi
+
+  if [[ ! -f "$settings_file" ]]; then
+    mkdir -p "$(dirname "$settings_file")"
+    echo '{}' > "$settings_file"
+  fi
+
+  # Atlassian MCP server (required by eve-pr skill for Jira operations)
+  local atlassian_url="https://mcp.atlassian.com/v1/mcp"
+  if jq -e --arg url "$atlassian_url" \
+      '.mcpServers // {} | to_entries | any(.value.url == $url)' \
+      "$settings_file" 2>/dev/null | grep -q true; then
+    log_success "Atlassian MCP server (already registered)"
+  else
+    jq --arg url "$atlassian_url" '
+      .mcpServers.atlassian = {type: "http", url: $url}
+    ' "$settings_file" > "$settings_file.tmp" && mv "$settings_file.tmp" "$settings_file"
+    log_success "Atlassian MCP server → $settings_file"
+    log_info "  First Jira tool use will prompt for OAuth authorization in your browser."
+  fi
+}
+
+# Main
+log_info "Host: $HOST"
+log_info "Prefix mode: $(if [[ "$USE_PREFIX" == true ]]; then echo "evestack-<skill>"; else echo "<skill> (no prefix)"; fi)"
+log_info "Install type: $(if [[ "$LOCAL_INSTALL" == true ]]; then echo "local (project)"; else echo "global (machine)"; fi)"
+echo ""
+
+install_skills
+register_hook
+register_mcp_servers
+
+echo ""
+log_success "evestack setup complete!"
+echo ""
+echo -e "  To add a new skill, create a directory with a ${BOLD}SKILL.md${NC} file and re-run ${BOLD}./setup${NC}"
+echo ""
