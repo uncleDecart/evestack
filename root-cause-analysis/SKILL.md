@@ -90,6 +90,8 @@ Merge Jira context and log findings into this format:
 **Ticket**: \<ID\> · \<issue type\> · \<status\> · Assignee: \<name\>
 **Device**: \<device name from ticket\> — \<hardware model from dmidecode/logs\>
 **EVE Version**: \<from archive\>
+**Cloud**: \<controller URL from run/config/server\>
+**Enterprise**: \<enterprise/org name, or "unknown"\>
 **Collection date**: \<from archive name or log timestamps\>
 **App/service affected**: \<from diag.out or ticket\>
 
@@ -121,6 +123,46 @@ Explain the gap — e.g. "QMP timeout looks like a connectivity issue but QEMU n
 
 ### Timeline *(include when sequence of events matters)*
 Chronological key events from the logs.
+
+---
+
+## Step 5 — Save to EVE Brain
+
+After producing the report, check whether EVE Brain is configured:
+
+```bash
+BRAIN_ENABLED=false
+BRAIN_DIR=""
+[ -f "$HOME/.evestack/config" ] && source "$HOME/.evestack/config"
+BRAIN_DIR="${BRAIN_DIR:-$HOME/.evestack/brain}"
+[ "$BRAIN_ENABLED" = "true" ] && [ -d "$BRAIN_DIR/.git" ] && BRAIN_READY=true || BRAIN_READY=false
+echo "BRAIN_READY=$BRAIN_READY"
+```
+
+If `BRAIN_READY=true`:
+
+### 5a. Save RCA report
+
+Write the full report to `$BRAIN_DIR/rca-reports/<TICKET_ID>.md` (or
+`rca-reports/<TICKET_ID>-<date>.md` if no ticket ID). Then commit:
+
+```bash
+cd "$BRAIN_DIR"
+git add "rca-reports/"
+git commit -m "rca: $TICKET_ID — $(date +%Y-%m-%d)"
+echo "RCA_SAVED=true"
+```
+
+### 5b. Offer to save key findings as a learning
+
+If the root cause is clearly identified (confidence High or Medium), ask the
+user: "Save the root cause as a brain learning so future sessions recognize
+this pattern?"
+
+If yes, invoke the `/brain-learn` skill with the root cause summary, tagging
+it with the EVE version and affected component from the report.
+
+Tell the user: "RCA saved to brain. Run `/brain-sync` to push to remote."
 
 ---
 

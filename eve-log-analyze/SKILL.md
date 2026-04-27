@@ -18,7 +18,44 @@ SKILL_DIR="<path from context>"   # e.g. ~/.claude/skills/eve-log-analyze
 
 ---
 
-## Step 0: Locate the archive
+## Step 0: Load brain learnings
+
+```bash
+BRAIN_ENABLED=false
+BRAIN_DIR=""
+[ -f "$HOME/.evestack/config" ] && source "$HOME/.evestack/config"
+BRAIN_DIR="${BRAIN_DIR:-$HOME/.evestack/brain}"
+[ "$BRAIN_ENABLED" = "true" ] && [ -f "$BRAIN_DIR/learnings.jsonl" ] && BRAIN_READY=true || BRAIN_READY=false
+echo "BRAIN_READY=$BRAIN_READY"
+```
+
+If `BRAIN_READY=true`, scan `learnings.jsonl` for entries relevant to this
+analysis. Read the file and surface entries that match the EVE version (once
+known from Step 1) or whose tags overlap with the issue being investigated.
+Display them as a "Known patterns" block before triage begins — they can
+short-circuit the investigation.
+
+```bash
+if [ "$BRAIN_READY" = "true" ]; then
+  echo "=== BRAIN LEARNINGS ==="
+  # Show all learnings — filter by EVE version and tags after Step 1 if needed
+  cat "$BRAIN_DIR/learnings.jsonl" 2>/dev/null | python3 -c "
+import sys, json
+entries = [json.loads(l) for l in sys.stdin if l.strip()]
+for e in entries[-20:]:  # last 20 most recent
+    print(f\"[{e.get('date','?')}] {e.get('insight','')}  (tags: {', '.join(e.get('tags',[]))})\")
+" 2>/dev/null || true
+  echo "=== END BRAIN LEARNINGS ==="
+fi
+```
+
+After reading EVE version in Step 1, narrow these down to entries whose
+`eve_version` matches the major version (e.g. `14.5.x` matches `14.5.2-lts`)
+or whose tags include the hypervisor type or component relevant to the issue.
+
+---
+
+## Step 1: Locate the archive
 
 The archive path comes from the skill argument — shown as `ARGUMENTS: <path>` in
 your context. If no argument was provided, ask the user for the path.
@@ -35,7 +72,9 @@ Set `ARCHIVE` for all subsequent steps.
 
 ---
 
-## Step 1: EVE version → GitHub base URL
+## Step 1: EVE version, cloud, and enterprise
+
+### EVE version → GitHub base URL
 
 ```bash
 cat "$ARCHIVE/root-run/eve-release"
@@ -54,6 +93,36 @@ GH_BASE=https://github.com/lf-edge/eve/blob/$EVE_VERSION
 ```
 
 Use `$GH_BASE/<file>#L<line>` for all source links in the report.
+
+### Cloud (controller URL)
+
+```bash
+cat "$ARCHIVE/run/config/server" 2>/dev/null
+```
+
+This contains the controller hostname, e.g. `zedcloud.zededa.net`. If the file is
+absent, look for it in `diag.out`:
+```bash
+grep -m1 -i "cloud\|controller" "$ARCHIVE/root-run/diag.out" 2>/dev/null
+```
+
+Set `CLOUD_URL=<value>`.
+
+### Enterprise
+
+```bash
+cat "$ARCHIVE/run/config/enterprise" 2>/dev/null
+```
+
+If absent, check the device certificate CN:
+```bash
+openssl x509 -noout -subject -in "$ARCHIVE/certs/device.cert.pem" 2>/dev/null | \
+  grep -oP 'O\s*=\s*\K[^,/]+'
+```
+
+Fall back to scanning `diag.out` for an enterprise or project name. Set
+`ENTERPRISE=<value or "unknown">` — the report must always include a line for this
+field even if the value cannot be determined.
 
 ---
 
@@ -201,6 +270,8 @@ Structure the report as:
 ## EVE Log Analysis Report
 
 **EVE Version**: <version>
+**Cloud**: <controller URL from run/config/server>
+**Enterprise**: <enterprise/org name, or "unknown">
 **Device UUID**: <from archive name or root-run/eve.id>
 **Collection date**: <from archive name or dmesg timestamps>
 
